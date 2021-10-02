@@ -214,6 +214,10 @@ static ccs_hyperparameter_t variable_info_to_hyperparameter(
           name, CCS_NUM_INTEGER, lower, upper, step, lower, NULL, &ret));
       }
       break;
+    case ValueType::kokkos_value_string:
+        CCS_CHECK(ccs_create_string_hyperparameter(
+          name, NULL, &ret));
+      break;
     default:
       assert(false && "Invalid ValueType");
     }
