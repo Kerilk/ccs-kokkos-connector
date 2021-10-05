@@ -73,6 +73,9 @@ extern "C" void kokkosp_end_parallel_reduce(const uint64_t kID) {
 }
 /* ...end blind copy pasting... */
 
+std::map<size_t, ccs_hyperparameter_t> features;
+std::map<size_t, ccs_hyperparameter_t> hyperparameters;
+
 extern "C" void kokkosp_parse_args(int argc, char **argv) {
 }
 
@@ -97,6 +100,10 @@ extern "C" void kokkosp_init_library(const int loadSeq,
 
 extern "C" void kokkosp_finalize_library() {
   std::cout << "Finalizing CConfigSpace adapter" << std::endl;
+  for (auto const& x : features)
+    CCS_CHECK(ccs_release_object(x.second));
+  for (auto const& x : hyperparameters)
+    CCS_CHECK(ccs_release_object(x.second));
   CCS_CHECK(ccs_fini());
 }
 
@@ -219,7 +226,7 @@ static ccs_hyperparameter_t variable_info_to_hyperparameter(
           name, NULL, &ret));
       break;
     default:
-      assert(false && "Invalid ValueType");
+      assert(false && "Unknown ValueType");
     }
     break;
   default:
@@ -228,15 +235,11 @@ static ccs_hyperparameter_t variable_info_to_hyperparameter(
   return ret;
 }
 
-std::map<size_t, ccs_hyperparameter_t> features;
-
 extern "C" void
 kokkosp_declare_input_type(const char *name, const size_t id,
                            Kokkos::Tools::Experimental::VariableInfo *info) {
   features[id] = variable_info_to_hyperparameter(name, info);
 }
-
-std::map<size_t, ccs_hyperparameter_t> hyperparameters;
 
 extern "C" void
 kokkosp_declare_output_type(const char *name, const size_t id,
