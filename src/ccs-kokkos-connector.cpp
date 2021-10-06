@@ -8,11 +8,20 @@
 #include <stack>
 #include <vector>
 #include <time.h>
+#include <stdio.h>
 
 #define CCS_CHECK(expr)            \
   do {                             \
     assert(CCS_SUCCESS == (expr)); \
   } while(0)
+
+#ifndef CCS_DEBUG
+#define CCS_DEBUG 0
+#endif
+
+#define CCS_DEBUG_MSG(fmt, ...) do { \
+  if(CCS_DEBUG) fprintf(stderr, fmt, ##__VA_ARGS__); \
+} while(0)
 
 static constexpr const double epsilon = 1E-24;
 
@@ -112,7 +121,7 @@ extern "C" void kokkosp_finalize_library() {
     CCS_CHECK(ccs_release_object(x.second));
   hyperparameters.clear();
   for (auto const& x : tuners)
-    CCS_CHECK(ccs_release_object(x.second));
+    CCS_CHECK(ccs_release_object(std::get<0>(x.second)));
   tuners.clear();
   CCS_CHECK(ccs_fini());
 }
@@ -124,6 +133,7 @@ static ccs_hyperparameter_t variable_info_to_hyperparameter(
   ccs_hyperparameter_t ret;
   switch (info->valueQuantity) {
   case CandidateValueType::kokkos_value_set:
+    CCS_DEBUG_MSG("\tvalue set (%zu)\n", info->candidates.set.size);
     {
       ccs_datum_t *values = new ccs_datum_t[info->candidates.set.size];
       for (size_t i = 0; i < info->candidates.set.size; i++) {
@@ -162,8 +172,15 @@ static ccs_hyperparameter_t variable_info_to_hyperparameter(
     }
     break;
   case CandidateValueType::kokkos_value_range:
+    CCS_DEBUG_MSG("\tvalue range: ");
     switch (info->type) {
     case ValueType::kokkos_value_double:
+      CCS_DEBUG_MSG("double: %s%f..%f%s step: %f\n",
+        info->candidates.range.openLower ? "(" : "[",
+        info->candidates.range.lower.double_value,
+        info->candidates.range.upper.double_value,
+        info->candidates.range.openUpper ? ")" : "]",
+        info->candidates.range.step.double_value);
       {
         ccs_float_t lower = info->candidates.range.lower.double_value;
         ccs_float_t upper = info->candidates.range.upper.double_value;
@@ -186,6 +203,12 @@ static ccs_hyperparameter_t variable_info_to_hyperparameter(
       }
       break;
     case ValueType::kokkos_value_int64:
+      CCS_DEBUG_MSG("int: %s%" PRId64 "..%" PRId64 "%s step: %" PRId64 "\n",
+        info->candidates.range.openLower ? "(" : "[",
+        info->candidates.range.lower.int_value,
+        info->candidates.range.upper.int_value,
+        info->candidates.range.openUpper ? ")" : "]",
+        info->candidates.range.step.int_value);
       {
         ccs_int_t lower = info->candidates.range.lower.int_value;
         ccs_int_t upper = info->candidates.range.upper.int_value;
@@ -212,6 +235,7 @@ static ccs_hyperparameter_t variable_info_to_hyperparameter(
     }
     break;
   case CandidateValueType::kokkos_value_unbounded:
+    CCS_DEBUG_MSG("\tvalue unbounded\n");
     switch (info->type) {
     case ValueType::kokkos_value_double:
       {
@@ -248,13 +272,17 @@ static ccs_hyperparameter_t variable_info_to_hyperparameter(
 extern "C" void
 kokkosp_declare_input_type(const char *name, const size_t id,
                            Kokkos::Tools::Experimental::VariableInfo *info) {
+  CCS_DEBUG_MSG("Got context variable: %s\n", name);
   features[id] = variable_info_to_hyperparameter(name, info);
+  CCS_DEBUG_MSG("...mapped to %p\n", (void *)features[id]);
 }
 
 extern "C" void
 kokkosp_declare_output_type(const char *name, const size_t id,
                             Kokkos::Tools::Experimental::VariableInfo *info) {
+  CCS_DEBUG_MSG("Got tuning variable: %s\n", name);
   hyperparameters[id] = variable_info_to_hyperparameter(name, info);
+  CCS_DEBUG_MSG("...mapped to %p\n", (void *)hyperparameters[id]);
 }
 
 static inline void
@@ -264,13 +292,16 @@ set_value(
   switch(tuningValue->metadata->type) {
   case ValueType::kokkos_value_double:
     tuningValue->value.double_value = d->value.f;
+    CCS_DEBUG_MSG("sent: %f\n", tuningValue->value.double_value);
     break;
   case ValueType::kokkos_value_int64:
     tuningValue->value.int_value = d->value.i;
+    CCS_DEBUG_MSG("sent: %" PRId64 "\n", tuningValue->value.int_value);
     break;
   case ValueType::kokkos_value_string:
     strncpy(tuningValue->value.string_value, d->value.s,
             KOKKOS_TOOLS_TUNING_STRING_LENGTH);
+    CCS_DEBUG_MSG("sent: %s\n", tuningValue->value.string_value);
     break;
   default:
     assert(false && "Unknown ValueType");
@@ -283,12 +314,15 @@ extract_value(
     ccs_datum_t *d) {
   switch(tuningValue->metadata->type) {
   case ValueType::kokkos_value_double:
+    CCS_DEBUG_MSG("received: %f\n", tuningValue->value.double_value);
     *d = ccs_float(tuningValue->value.double_value);
     break;
   case ValueType::kokkos_value_int64:
+    CCS_DEBUG_MSG("received: %" PRId64 "\n", tuningValue->value.int_value);
     *d = ccs_int(tuningValue->value.int_value);
     break;
   case ValueType::kokkos_value_string:
+    CCS_DEBUG_MSG("received: %s\n", tuningValue->value.string_value);
     *d = ccs_string(tuningValue->value.string_value);
     d->flags = CCS_FLAG_TRANSIENT;
     break;
@@ -321,6 +355,8 @@ extern "C" void kokkosp_request_values(
   struct timespec           start;
   bool                      converged;
 
+  CCS_DEBUG_MSG("Querying variables: %zu, numContextVariables: %zu, numTuningVariables: %zu\n", contextId, numContextVariables, numTuningVariables);
+
   for (size_t i = 0; i < numContextVariables; i++)
     regionId.insert(contextValues[i].type_id);
   for (size_t i = 0; i < numTuningVariables; i++)
@@ -339,6 +375,13 @@ extern "C" void kokkosp_request_values(
     for (size_t i = 0; i < numTuningVariables; i++)
       CCS_CHECK(ccs_configuration_space_add_hyperparameter(cs,
         hyperparameters[tuningValues[i].type_id], NULL));
+
+#if CCS_DEBUG
+    for (size_t i = 0; i < numTuningVariables; i++) {
+      ccs_datum_t d;
+      extract_value(tuningValues + i, &d);
+    }
+#endif
 
     CCS_CHECK(ccs_create_features_space(
       ("fs (region: " + std::to_string(regionCounter) + ")").c_str(), NULL, &fs));
@@ -421,6 +464,10 @@ extern "C" void kokkosp_request_values(
   contexts[contextId] = std::make_tuple(start, tuner, feat, configuration, converged);
 }
 
+extern "C" void kokkosp_begin_context(size_t contextId) {
+  CCS_DEBUG_MSG("Entering region: %zu\n", contextId);
+}
+
 extern "C" void kokkosp_end_context(size_t contextId) {
   struct timespec           start, stop;
   ccs_features_tuner_t      tuner;
@@ -430,9 +477,14 @@ extern "C" void kokkosp_end_context(size_t contextId) {
   bool                      converged;
 
   clock_gettime(CLOCK_MONOTONIC, &stop);
+  CCS_DEBUG_MSG("Leaving region: %zu\n", contextId);
+
   auto ctx = contexts.find(contextId);
   if (ctx == contexts.end())
     return;
+
+  CCS_DEBUG_MSG("Found tuning context\n");
+
   convergence_stack.pop();
   auto context = ctx->second;
   start         = std::get<0>(context);
@@ -448,6 +500,7 @@ extern "C" void kokkosp_end_context(size_t contextId) {
     ccs_datum_t elapsed = ccs_int(
        ((ccs_int_t)(stop.tv_sec)  - (ccs_int_t)(start.tv_sec)) * 1000000000
       + (ccs_int_t)(stop.tv_nsec) - (ccs_int_t)(start.tv_nsec));
+    CCS_DEBUG_MSG("elapsed time: %f ms\n", elapsed.value.i / 1000000.0);
 
     CCS_CHECK(ccs_features_tuner_get_objective_space(tuner, &objective_space));
     CCS_CHECK(ccs_create_features_evaluation(objective_space, configuration, feat,
