@@ -423,6 +423,8 @@ extern "C" void kokkosp_request_values(
     size_t history_size;
     CCS_CHECK(ccs_features_tuner_get_history(tuner, NULL, 0, NULL, &history_size));
     converged = (history_size >= convergence_cutoff);
+    if (converged)
+	tuners[regionId] = std::make_tuple(tuner, converged);
   }
   if (convergence_stack.top()) // if we are in a converged region,
     convergence_stack.push(converged);
