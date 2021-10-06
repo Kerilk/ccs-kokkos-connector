@@ -405,7 +405,7 @@ extern "C" void kokkosp_request_values(
   {
     ccs_datum_t *values = new ccs_datum_t[numTuningVariables];
     CCS_CHECK(ccs_configuration_get_values(configuration, numTuningVariables, values, NULL));
-    for (size_t i = 0; i < numContextVariables; i++) {
+    for (size_t i = 0; i < numTuningVariables; i++) {
       size_t indx;
       CCS_CHECK(ccs_configuration_space_get_hyperparameter_index(configuration_space,
         hyperparameters[tuningValues[i].type_id], &indx));
