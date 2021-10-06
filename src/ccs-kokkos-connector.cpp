@@ -78,7 +78,7 @@ extern "C" void kokkosp_end_parallel_reduce(const uint64_t kID) {
 
 static std::map<size_t, ccs_hyperparameter_t> features;
 static std::map<size_t, ccs_hyperparameter_t> hyperparameters;
-static std::map<std::set<size_t>, ccs_features_tuner_t> tuners;
+static std::map<std::set<size_t>, std::tuple<ccs_features_tuner_t, bool>> tuners;
 
 extern "C" void kokkosp_parse_args(int argc, char **argv) {
 }
@@ -367,10 +367,13 @@ extern "C" void kokkosp_request_values(
     CCS_CHECK(ccs_release_object(fs));
     CCS_CHECK(ccs_release_object(os));
 
-    tuners[regionId] = tuner;
+    converged = false;
+    tuners[regionId] = std::make_tuple(tuner, converged);
     regionCounter++;
-  } else
-    tuner = tun->second;
+  } else {
+    tuner = std::get<0>(tun->second);
+    converged = std::get<1>(tun->second);
+  }
 
   // Test convergence using history size, could be done better
   if (!converged) {
