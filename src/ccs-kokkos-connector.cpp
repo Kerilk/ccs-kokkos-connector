@@ -427,8 +427,11 @@ extern "C" void kokkosp_end_context(size_t contextId) {
   bool                      converged;
 
   clock_gettime(CLOCK_MONOTONIC, &stop);
+  auto ctx = contexts.find(contextId);
+  if (ctx == contexts.end())
+    return;
   convergence_stack.pop();
-  auto context = contexts[contextId];
+  auto context = ctx->second;
   start         = std::get<0>(context);
   tuner         = std::get<1>(context);
   feat          = std::get<2>(context);
