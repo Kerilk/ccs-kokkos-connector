@@ -5,6 +5,8 @@
 #include <cassert>
 #include <map>
 #include <set>
+#include <stack>
+#include <vector>
 #include <time.h>
 
 #define CCS_CHECK(expr)            \
@@ -12,18 +14,18 @@
     assert(CCS_SUCCESS == (expr)); \
   } while(0)
 
-constexpr const double epsilon = 1E-24;
+static constexpr const double epsilon = 1E-24;
 
 using namespace Kokkos::Tools::Experimental;
 
-/* from Apollo Kokkos Connector, don't ask me... */
-static size_t num_unconverged_regions;
+//initialize the stack to true, so it should never be empty.
+static std::stack<bool, std::vector<bool>> convergence_stack;
+static constexpr const size_t convergence_cutoff = 100;
 
-Kokkos::Tools::Experimental::ToolProgrammingInterface helper_functions;
-void invoke_fence(uint32_t devID) {
-  if ((helper_functions.fence != nullptr) && (num_unconverged_regions > 0)) {
+static Kokkos::Tools::Experimental::ToolProgrammingInterface helper_functions;
+static void invoke_fence(uint32_t devID) {
+  if (!convergence_stack.top()) // if we are in a non converged state, we fence
     helper_functions.fence(devID);
-  }
 }
 
 extern "C" void kokkosp_provide_tool_programming_interface(
@@ -73,11 +75,10 @@ extern "C" void kokkosp_end_parallel_reduce(const uint64_t kID) {
   uint32_t devID = kID;
   invoke_fence(devID);
 }
-/* ...end blind copy pasting... */
 
-std::map<size_t, ccs_hyperparameter_t> features;
-std::map<size_t, ccs_hyperparameter_t> hyperparameters;
-std::map<std::set<size_t>, ccs_features_tuner_t> tuners;
+static std::map<size_t, ccs_hyperparameter_t> features;
+static std::map<size_t, ccs_hyperparameter_t> hyperparameters;
+static std::map<std::set<size_t>, ccs_features_tuner_t> tuners;
 
 extern "C" void kokkosp_parse_args(int argc, char **argv) {
 }
@@ -99,6 +100,7 @@ extern "C" void kokkosp_init_library(const int loadSeq,
                                      void *deviceInfo) {
   std::cout << "Initializing CConfigSpace adapter" << std::endl;
   CCS_CHECK(ccs_init());
+  convergence_stack.push(true);
 }
 
 extern "C" void kokkosp_finalize_library() {
@@ -295,8 +297,12 @@ extract_value(
   }
 }
 
-std::map<size_t, std::tuple<struct timespec, ccs_features_tuner_t,
-                            ccs_features_t, ccs_configuration_t>> contexts;
+static std::map<size_t,
+                std::tuple<struct timespec,
+                           ccs_features_tuner_t,
+                           ccs_features_t,
+                           ccs_configuration_t,
+                           bool>> contexts;
 static int regionCounter = 0;
 
 extern "C" void kokkosp_request_values(
@@ -313,6 +319,7 @@ extern "C" void kokkosp_request_values(
   ccs_configuration_t       configuration;
   ccs_configuration_space_t configuration_space;
   struct timespec           start;
+  bool                      converged;
 
   for (size_t i = 0; i < numContextVariables; i++)
     regionId.insert(contextValues[i].type_id);
@@ -365,6 +372,15 @@ extern "C" void kokkosp_request_values(
   } else
     tuner = tun->second;
 
+  // Test convergence using history size, could be done better
+  size_t history_size;
+  CCS_CHECK(ccs_features_tuner_get_history(tuner, NULL, 0, NULL, &history_size));
+  converged = (history_size >= convergence_cutoff);
+  if (convergence_stack.top()) // if we are in a converged region,
+    convergence_stack.push(converged);
+  else // else propagate unconverged status
+    convergence_stack.push(false);
+
   CCS_CHECK(ccs_features_tuner_get_features_space(tuner, &features_space));
   {
     ccs_datum_t *values = new ccs_datum_t[numContextVariables];
@@ -378,7 +394,11 @@ extern "C" void kokkosp_request_values(
     delete[] values;
   }
 
-  CCS_CHECK(ccs_features_tuner_ask(tuner, feat, 1, &configuration, NULL));
+  if (!converged)
+    CCS_CHECK(ccs_features_tuner_ask(tuner, feat, 1, &configuration, NULL));
+  else
+    CCS_CHECK(ccs_features_tuner_suggest(tuner, feat, &configuration));
+
   CCS_CHECK(ccs_features_tuner_get_configuration_space(tuner, &configuration_space));
   {
     ccs_datum_t *values = new ccs_datum_t[numTuningVariables];
@@ -393,7 +413,7 @@ extern "C" void kokkosp_request_values(
   }
 
   clock_gettime(CLOCK_MONOTONIC, &start);
-  contexts[contextId] = std::make_tuple(start, tuner, feat, configuration);
+  contexts[contextId] = std::make_tuple(start, tuner, feat, configuration, converged);
 }
 
 extern "C" void kokkosp_end_context(size_t contextId) {
@@ -401,28 +421,34 @@ extern "C" void kokkosp_end_context(size_t contextId) {
   ccs_features_tuner_t      tuner;
   ccs_features_t            feat;
   ccs_configuration_t       configuration;
-  ccs_features_evaluation_t evaluation;
   ccs_objective_space_t     objective_space;
+  bool                      converged;
 
   clock_gettime(CLOCK_MONOTONIC, &stop);
-  std::tuple<struct timespec, ccs_features_tuner_t,
-             ccs_features_t, ccs_configuration_t> context = contexts[contextId];
+  convergence_stack.pop();
+  auto context = contexts[contextId];
   start         = std::get<0>(context);
   tuner         = std::get<1>(context);
   feat          = std::get<2>(context);
   configuration = std::get<3>(context);
+  converged     = std::get<4>(context);
   contexts.erase(contextId);
 
-  ccs_datum_t elapsed = ccs_int(
-     ((ccs_int_t)(stop.tv_sec) - (ccs_int_t)(start.tv_sec)) * 1000000000
-    + (ccs_int_t)(stop.tv_nsec) - (ccs_int_t)(start.tv_nsec));
+  if (!converged) { // do not report if not fencing and already converged.
+    ccs_features_evaluation_t evaluation;
+    // elapsed time in nanosecond
+    ccs_datum_t elapsed = ccs_int(
+       ((ccs_int_t)(stop.tv_sec)  - (ccs_int_t)(start.tv_sec)) * 1000000000
+      + (ccs_int_t)(stop.tv_nsec) - (ccs_int_t)(start.tv_nsec));
 
-  CCS_CHECK(ccs_features_tuner_get_objective_space(tuner, &objective_space));
-  CCS_CHECK(ccs_create_features_evaluation(objective_space, configuration, feat,
-            CCS_SUCCESS, 1, &elapsed, NULL, &evaluation));
-  CCS_CHECK(ccs_features_tuner_tell(tuner, 1, &evaluation));
+    CCS_CHECK(ccs_features_tuner_get_objective_space(tuner, &objective_space));
+    CCS_CHECK(ccs_create_features_evaluation(objective_space, configuration, feat,
+              CCS_SUCCESS, 1, &elapsed, NULL, &evaluation));
 
-  CCS_CHECK(ccs_release_object(evaluation));
+    CCS_CHECK(ccs_features_tuner_tell(tuner, 1, &evaluation));
+    CCS_CHECK(ccs_release_object(evaluation));
+  }
+
   CCS_CHECK(ccs_release_object(feat));
   CCS_CHECK(ccs_release_object(configuration));
 }
