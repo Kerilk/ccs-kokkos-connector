@@ -20,7 +20,7 @@ using namespace Kokkos::Tools::Experimental;
 
 //initialize the stack to true, so it should never be empty.
 static std::stack<bool, std::vector<bool>> convergence_stack;
-static constexpr const size_t convergence_cutoff = 100;
+static constexpr const size_t convergence_cutoff = 500;
 
 static Kokkos::Tools::Experimental::ToolProgrammingInterface helper_functions;
 static void invoke_fence(uint32_t devID) {
