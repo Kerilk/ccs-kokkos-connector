@@ -4,6 +4,8 @@
 #include <iostream>
 #include <cassert>
 #include <map>
+#include <set>
+#include <time.h>
 
 #define CCS_CHECK(expr)            \
   do {                             \
@@ -75,6 +77,7 @@ extern "C" void kokkosp_end_parallel_reduce(const uint64_t kID) {
 
 std::map<size_t, ccs_hyperparameter_t> features;
 std::map<size_t, ccs_hyperparameter_t> hyperparameters;
+std::map<std::set<size_t>, ccs_features_tuner_t> tuners;
 
 extern "C" void kokkosp_parse_args(int argc, char **argv) {
 }
@@ -102,8 +105,13 @@ extern "C" void kokkosp_finalize_library() {
   std::cout << "Finalizing CConfigSpace adapter" << std::endl;
   for (auto const& x : features)
     CCS_CHECK(ccs_release_object(x.second));
+  features.clear();
   for (auto const& x : hyperparameters)
     CCS_CHECK(ccs_release_object(x.second));
+  hyperparameters.clear();
+  for (auto const& x : tuners)
+    CCS_CHECK(ccs_release_object(x.second));
+  tuners.clear();
   CCS_CHECK(ccs_fini());
 }
 
@@ -245,4 +253,176 @@ extern "C" void
 kokkosp_declare_output_type(const char *name, const size_t id,
                             Kokkos::Tools::Experimental::VariableInfo *info) {
   hyperparameters[id] = variable_info_to_hyperparameter(name, info);
+}
+
+static inline void
+set_value(
+    Kokkos::Tools::Experimental::VariableValue *tuningValue,
+    ccs_datum_t *d) {
+  switch(tuningValue->metadata->type) {
+  case ValueType::kokkos_value_double:
+    tuningValue->value.double_value = d->value.f;
+    break;
+  case ValueType::kokkos_value_int64:
+    tuningValue->value.int_value = d->value.i;
+    break;
+  case ValueType::kokkos_value_string:
+    strncpy(tuningValue->value.string_value, d->value.s,
+            KOKKOS_TOOLS_TUNING_STRING_LENGTH);
+    break;
+  default:
+    assert(false && "Unknown ValueType");
+  }
+}
+
+static inline void
+extract_value(
+    Kokkos::Tools::Experimental::VariableValue *tuningValue,
+    ccs_datum_t *d) {
+  switch(tuningValue->metadata->type) {
+  case ValueType::kokkos_value_double:
+    *d = ccs_float(tuningValue->value.double_value);
+    break;
+  case ValueType::kokkos_value_int64:
+    *d = ccs_int(tuningValue->value.int_value);
+    break;
+  case ValueType::kokkos_value_string:
+    *d = ccs_string(tuningValue->value.string_value);
+    d->flags = CCS_FLAG_TRANSIENT;
+    break;
+  default:
+    assert(false && "Unknown ValueType");
+  }
+}
+
+std::map<size_t, std::tuple<struct timespec, ccs_features_tuner_t,
+                            ccs_features_t, ccs_configuration_t>> contexts;
+static int regionCounter = 0;
+
+extern "C" void kokkosp_request_values(
+    size_t contextId,
+    size_t numContextVariables,
+    Kokkos::Tools::Experimental::VariableValue *contextValues,
+    size_t numTuningVariables,
+    Kokkos::Tools::Experimental::VariableValue *tuningValues) {
+
+  std::set<size_t>          regionId;
+  ccs_features_tuner_t      tuner;
+  ccs_features_t            feat;
+  ccs_features_space_t      features_space;
+  ccs_configuration_t       configuration;
+  ccs_configuration_space_t configuration_space;
+  struct timespec           start;
+
+  for (size_t i = 0; i < numContextVariables; i++)
+    regionId.insert(contextValues[i].type_id);
+  for (size_t i = 0; i < numTuningVariables; i++)
+    regionId.insert(tuningValues[i].type_id);
+
+  auto tun = tuners.find(regionId);
+  if (tun == tuners.end()) {
+    ccs_configuration_space_t cs;
+    ccs_features_space_t      fs;
+    ccs_objective_space_t     os;
+    ccs_hyperparameter_t      htime;
+    ccs_expression_t          expression;
+
+    CCS_CHECK(ccs_create_configuration_space(
+      ("cs (region: " + std::to_string(regionCounter) + ")").c_str(), NULL, &cs));
+    for (size_t i = 0; i < numTuningVariables; i++)
+      CCS_CHECK(ccs_configuration_space_add_hyperparameter(cs,
+        hyperparameters[tuningValues[i].type_id], NULL));
+
+    CCS_CHECK(ccs_create_features_space(
+      ("fs (region: " + std::to_string(regionCounter) + ")").c_str(), NULL, &fs));
+    for (size_t i = 0; i < numContextVariables; i++)
+      CCS_CHECK(ccs_features_space_add_hyperparameter(fs,
+        features[contextValues[i].type_id]));
+
+    ccs_int_t lower = 0;
+    ccs_int_t upper = CCS_INT_MAX;
+    ccs_int_t step  = 0;
+    CCS_CHECK(ccs_create_objective_space(
+      ("os (region: " + std::to_string(regionCounter) + ")").c_str(), NULL, &os));
+    CCS_CHECK(ccs_create_numerical_hyperparameter("time",
+      CCS_NUM_INTEGER, lower, upper, step, lower, NULL, &htime));
+    CCS_CHECK(ccs_create_variable(htime, &expression));
+    CCS_CHECK(ccs_objective_space_add_hyperparameter(os, htime));
+    CCS_CHECK(ccs_objective_space_add_objective(os, expression,
+      CCS_MINIMIZE));
+    CCS_CHECK(ccs_release_object(expression));
+    CCS_CHECK(ccs_release_object(htime));
+
+    CCS_CHECK(ccs_create_random_features_tuner(
+      ("random tuner (region: " + std::to_string(regionCounter) + ")").c_str(),
+      cs, fs, os, NULL, &tuner));
+    CCS_CHECK(ccs_release_object(cs));
+    CCS_CHECK(ccs_release_object(fs));
+    CCS_CHECK(ccs_release_object(os));
+
+    tuners[regionId] = tuner;
+    regionCounter++;
+  } else
+    tuner = tun->second;
+
+  CCS_CHECK(ccs_features_tuner_get_features_space(tuner, &features_space));
+  {
+    ccs_datum_t *values = new ccs_datum_t[numContextVariables];
+    for (size_t i = 0; i < numContextVariables; i++) {
+      size_t indx;
+      CCS_CHECK(ccs_features_space_get_hyperparameter_index(features_space,
+        features[contextValues[i].type_id], &indx));
+      extract_value(contextValues + i, values + indx);
+    }
+    CCS_CHECK(ccs_create_features(features_space, numContextVariables, values, NULL, &feat));
+    delete[] values;
+  }
+
+  CCS_CHECK(ccs_features_tuner_ask(tuner, feat, 1, &configuration, NULL));
+  CCS_CHECK(ccs_features_tuner_get_configuration_space(tuner, &configuration_space));
+  {
+    ccs_datum_t *values = new ccs_datum_t[numTuningVariables];
+    CCS_CHECK(ccs_configuration_get_values(configuration, numTuningVariables, values, NULL));
+    for (size_t i = 0; i < numContextVariables; i++) {
+      size_t indx;
+      CCS_CHECK(ccs_configuration_space_get_hyperparameter_index(configuration_space,
+        hyperparameters[tuningValues[i].type_id], &indx));
+      set_value(tuningValues + i, values + indx);
+    }
+    delete[] values;
+  }
+
+  clock_gettime(CLOCK_MONOTONIC, &start);
+  contexts[contextId] = std::make_tuple(start, tuner, feat, configuration);
+}
+
+extern "C" void kokkosp_end_context(size_t contextId) {
+  struct timespec           start, stop;
+  ccs_features_tuner_t      tuner;
+  ccs_features_t            feat;
+  ccs_configuration_t       configuration;
+  ccs_features_evaluation_t evaluation;
+  ccs_objective_space_t     objective_space;
+
+  clock_gettime(CLOCK_MONOTONIC, &stop);
+  std::tuple<struct timespec, ccs_features_tuner_t,
+             ccs_features_t, ccs_configuration_t> context = contexts[contextId];
+  start         = std::get<0>(context);
+  tuner         = std::get<1>(context);
+  feat          = std::get<2>(context);
+  configuration = std::get<3>(context);
+  contexts.erase(contextId);
+
+  ccs_datum_t elapsed = ccs_int(
+     ((ccs_int_t)(stop.tv_sec) - (ccs_int_t)(start.tv_sec)) * 1000000000
+    + (ccs_int_t)(stop.tv_nsec) - (ccs_int_t)(start.tv_nsec));
+
+  CCS_CHECK(ccs_features_tuner_get_objective_space(tuner, &objective_space));
+  CCS_CHECK(ccs_create_features_evaluation(objective_space, configuration, feat,
+            CCS_SUCCESS, 1, &elapsed, NULL, &evaluation));
+  CCS_CHECK(ccs_features_tuner_tell(tuner, 1, &evaluation));
+
+  CCS_CHECK(ccs_release_object(evaluation));
+  CCS_CHECK(ccs_release_object(feat));
+  CCS_CHECK(ccs_release_object(configuration));
 }
