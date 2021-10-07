@@ -9,6 +9,7 @@
 #include <vector>
 #include <time.h>
 #include <stdio.h>
+#include <cstdint>
 
 #define CCS_CHECK(expr)            \
   do {                             \
@@ -22,6 +23,14 @@
 #define CCS_DEBUG_MSG(fmt, ...) do { \
   if(CCS_DEBUG) fprintf(stderr, fmt, ##__VA_ARGS__); \
 } while(0)
+
+#ifndef CCS_PROFILE
+#define CCS_PROFILE 0
+#endif
+
+#if CCS_PROFILE
+static int64_t ccs_time = 0;
+#endif
 
 static constexpr const double epsilon = 1E-24;
 
@@ -114,6 +123,12 @@ extern "C" void kokkosp_init_library(const int loadSeq,
 
 extern "C" void kokkosp_finalize_library() {
   std::cout << "Finalizing CConfigSpace adapter" << std::endl;
+
+#if CCS_PROFILE
+  struct timespec           prof_start, prof_stop;
+  clock_gettime(CLOCK_MONOTONIC, &prof_start);
+#endif
+
   for (auto const& x : features)
     CCS_CHECK(ccs_release_object(x.second));
   features.clear();
@@ -124,6 +139,13 @@ extern "C" void kokkosp_finalize_library() {
     CCS_CHECK(ccs_release_object(std::get<0>(x.second)));
   tuners.clear();
   CCS_CHECK(ccs_fini());
+#if CCS_PROFILE
+  clock_gettime(CLOCK_MONOTONIC, &prof_stop);
+  ccs_time += ((int64_t)(prof_stop.tv_sec)  - (int64_t)(prof_start.tv_sec)) * 1000000000
+             + (int64_t)(prof_stop.tv_nsec) - (int64_t)(prof_start.tv_nsec);
+  std::cout << "CCS profiling: " << (double)ccs_time/1000000.0 << " ms" << std::endl;
+#endif
+
 }
 
 
@@ -272,17 +294,39 @@ static ccs_hyperparameter_t variable_info_to_hyperparameter(
 extern "C" void
 kokkosp_declare_input_type(const char *name, const size_t id,
                            Kokkos::Tools::Experimental::VariableInfo *info) {
+#if CCS_PROFILE
+  struct timespec           prof_start, prof_stop;
+  clock_gettime(CLOCK_MONOTONIC, &prof_start);
+#endif
+
   CCS_DEBUG_MSG("Got context variable: %s\n", name);
   features[id] = variable_info_to_hyperparameter(name, info);
   CCS_DEBUG_MSG("...mapped to %p\n", (void *)features[id]);
+
+#if CCS_PROFILE
+  clock_gettime(CLOCK_MONOTONIC, &prof_stop);
+  ccs_time += ((int64_t)(prof_stop.tv_sec)  - (int64_t)(prof_start.tv_sec)) * 1000000000
+             + (int64_t)(prof_stop.tv_nsec) - (int64_t)(prof_start.tv_nsec);
+#endif
 }
 
 extern "C" void
 kokkosp_declare_output_type(const char *name, const size_t id,
                             Kokkos::Tools::Experimental::VariableInfo *info) {
+#if CCS_PROFILE
+  struct timespec           prof_start, prof_stop;
+  clock_gettime(CLOCK_MONOTONIC, &prof_start);
+#endif
+
   CCS_DEBUG_MSG("Got tuning variable: %s\n", name);
   hyperparameters[id] = variable_info_to_hyperparameter(name, info);
   CCS_DEBUG_MSG("...mapped to %p\n", (void *)hyperparameters[id]);
+
+#if CCS_PROFILE
+  clock_gettime(CLOCK_MONOTONIC, &prof_stop);
+  ccs_time += ((int64_t)(prof_stop.tv_sec)  - (int64_t)(prof_start.tv_sec)) * 1000000000
+             + (int64_t)(prof_stop.tv_nsec) - (int64_t)(prof_start.tv_nsec);
+#endif
 }
 
 static inline void
@@ -356,6 +400,11 @@ extern "C" void kokkosp_request_values(
   bool                      converged;
 
   CCS_DEBUG_MSG("Querying variables: %zu, numContextVariables: %zu, numTuningVariables: %zu\n", contextId, numContextVariables, numTuningVariables);
+
+#if CCS_PROFILE
+  struct timespec           prof_start, prof_stop;
+  clock_gettime(CLOCK_MONOTONIC, &prof_start);
+#endif
 
   for (size_t i = 0; i < numContextVariables; i++)
     regionId.insert(contextValues[i].type_id);
@@ -462,6 +511,12 @@ extern "C" void kokkosp_request_values(
     delete[] values;
   }
 
+#if CCS_PROFILE
+  clock_gettime(CLOCK_MONOTONIC, &prof_stop);
+  ccs_time += ((int64_t)(prof_stop.tv_sec)  - (int64_t)(prof_start.tv_sec)) * 1000000000
+             + (int64_t)(prof_stop.tv_nsec) - (int64_t)(prof_start.tv_nsec);
+#endif
+
   clock_gettime(CLOCK_MONOTONIC, &start);
   contexts[contextId] = std::make_tuple(start, tuner, feat, configuration, converged);
 }
@@ -484,6 +539,11 @@ extern "C" void kokkosp_end_context(size_t contextId) {
   auto ctx = contexts.find(contextId);
   if (ctx == contexts.end())
     return;
+
+#if CCS_PROFILE
+  struct timespec           prof_start, prof_stop;
+  clock_gettime(CLOCK_MONOTONIC, &prof_start);
+#endif
 
   CCS_DEBUG_MSG("Found tuning context\n");
 
@@ -514,4 +574,11 @@ extern "C" void kokkosp_end_context(size_t contextId) {
 
   CCS_CHECK(ccs_release_object(feat));
   CCS_CHECK(ccs_release_object(configuration));
+
+#if CCS_PROFILE
+  clock_gettime(CLOCK_MONOTONIC, &prof_stop);
+  ccs_time += ((int64_t)(prof_stop.tv_sec)  - (int64_t)(prof_start.tv_sec)) * 1000000000
+             + (int64_t)(prof_stop.tv_nsec) - (int64_t)(prof_start.tv_nsec);
+#endif
+
 }
